@@ -1,0 +1,953 @@
+---
+title: "Tunnel+"
+author: Jack Sadowski
+format: 
+  html:
+    embed-resources: true
+execute:
+  eval: true
+  warning: false
+  echo: false
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+```{r}
+#Dataset and main library
+tunnel_data<-read.csv("statcast_bat_tracking_2024_2025.csv")
+library(tidyverse)
+#Quadratic Formula function
+quad<- function(a, b, c) {
+  discriminant <- b^2 - 4 * a * c
+  root <- (-b - sqrt(discriminant)) / (2 * a)
+  return(root)
+}
+```
+
+## Introduction and Prior Work:
+
+When I did my investigation into fastball characteristics and whiff
+rates one major factor outside of our analysis was how a pitchers
+fastball interacts with their other pitches. Pitches do not exist in a
+vacuum. The success of a pitch can be heavily dependent on the profile
+of the previous pitch. For example Greg Maddux’s individual pitches
+weren’t overwhelming. But he threw them in a way that they looked the
+same for as long as possible on their path to the plate, before breaking
+apart at the last second. This approach, which was wildly successful for
+Maddux, is known as pitch tunneling. 
+
+Tunneling is very well known in the baseball world, but there are
+surprisingly few accessible metrics that capture it. There is no Stuff+
+or Location+ equivalent for tunneling. 
+
+The main metric I could find that attempted to quantify tunneling was
+from Baseball Prospectus in 2017 and was a big inspiration for my
+project. They created something called “Tunnel Differential”, which is
+the distance between two pitches at the point where the hitter has to
+make a swing decision. They called this point the “Tunnel Point” and
+measured it to be about 175 milliseconds before contact which translates
+to about 23.8 feet before the plate (the tunnel point I used for my own
+calculations). They also measured the difference at release between
+several pitches and how much a pitch moves after the tunnel point. 
+
+Another more recent metric that I found is Driveline’s Match+. Match+
+essentially evaluates the overall similarity of a pitchers arsenal out
+of the hand, using continuous 3D trajectory modeling. 
+
+Both of these metrics have immense merit, but they left a gap I wanted
+to explore. My goal was to create an all-in one metric to evaluate the
+full flight of individual pitches instead of arsenals. This would then
+allow me not only see and create overlays of some of the nastiest
+tunnels but also determine what pitchers actively tunnel the best on an
+individual pitch basis rather than just have the best tunneling stuff.
+
+## Data and Data Manipulation:
+
+Statcast data from Baseball Savant offers incredibly precise pitch
+tracking data. I was able to download a dataset of all pitches from the
+2024 and 2025 MLB season from a user on Kaggle which gave me everything
+I needed to conduct the analysis. Rather than the computationally
+expensive and complicated continuous pitch tracking used by Driveline I
+used a similar approach to Baseball Prospectus. Using kinematics and the
+release point, end point, velocity, and acceleration data given by
+Stacast, I calculated each pitch's position at four discrete points
+along its trajectory:
+
+1.  Release
+
+2.  Early Flight (40 feet from the plate)
+
+3.  The Tunnel Point (28.3 feet from the plate)
+
+4.  Home Plate
+
+Using these calculated positions I then grouped each pitch by at bat,
+and then calculated the difference between each pitch and the previous
+pitch’s position at all four checkpoints.
+
+```{r}
+#Adding in_zone variable (Used later for Regression)
+tunnel_data<-tunnel_data%>%
+  mutate(
+    in_zone_x = ifelse(abs(plate_x) <= 0.708, 1, 0),
+    in_zone_z = ifelse(plate_z >= sz_bot & plate_z <= sz_top, 1, 0),
+    in_zone = ifelse(in_zone_x == 1 & in_zone_z == 1, 1, 0)
+  )
+```
+
+```{r}
+#Finding Position at the Tunnel Point
+tunnel_data<-tunnel_data %>%
+  mutate(
+    y0=60.5-release_extension,
+    d=y0-23.8,
+    t_tunnel= quad(0.5*ay,vy0,d),
+    tunnel_x = release_pos_x + (vx0 * t_tunnel) + (0.5 * ax * (t_tunnel^2)),
+    tunnel_z = release_pos_z + (vz0 * t_tunnel) + (0.5 * az * (t_tunnel^2))
+  )
+```
+
+```{r}
+#Finding Position Early in Trajectory (40 feet) 
+tunnel_data<-tunnel_data %>%
+  mutate(
+    y0=60.5-release_extension,
+    d40=y0-40,
+    t40= quad(0.5*ay,vy0,d40),
+    x40 = release_pos_x + (vx0 * t40) + (0.5 * ax * (t40^2)),
+    z40 = release_pos_z + (vz0 * t40) + (0.5 * az * (t40^2))
+  )
+```
+
+```{r}
+#Grouping Consecutive Pitches Together and finding differences
+paired_pitches <- tunnel_data %>%
+  arrange(player_name, game_pk, at_bat_number, pitch_number) %>%
+  group_by(game_pk, at_bat_number) %>%
+  mutate(
+    prev_pitch_type = lag(pitch_type),
+    prev_pitch_velo = lag(release_speed),
+    prev_release_x = lag(release_pos_x),
+    prev_release_z = lag(release_pos_z),
+    prev_x40 = lag(x40),
+    prev_z40 = lag (z40),
+    prev_tunnel_x = lag(tunnel_x),
+    prev_tunnel_z = lag(tunnel_z),
+    prev_plate_x = lag(plate_x),
+    prev_plate_z = lag(plate_z),
+    prev_pfx_x = lag(pfx_x),
+    prev_pfx_z = lag(pfx_z),
+    prev_pitch_in_zone=lag(in_zone),
+    release_diff = sqrt((release_pos_x - prev_release_x)^2 + (release_pos_z - prev_release_z)^2),
+    early_diff = sqrt((x40 - prev_x40)^2 + (z40 - prev_z40)^2),
+    tunnel_diff = sqrt((tunnel_x - prev_tunnel_x)^2 + (tunnel_z - prev_tunnel_z)^2),
+    plate_diff = sqrt((plate_x - prev_plate_x)^2 + (plate_z - prev_plate_z)^2),
+    velo_diff = release_speed-prev_pitch_velo,
+    movement_diff=sqrt((pfx_x-prev_pfx_x)^2+(pfx_z-prev_pfx_z)^2)
+  ) %>%
+  ungroup() %>%
+  drop_na(release_diff, early_diff, tunnel_diff, plate_diff, velo_diff, movement_diff)%>%
+  filter(pitch_type!=prev_pitch_type)
+```
+
+## Dimension Reduction:
+
+Naturally, these four variables have high covariance. A pitch's position
+at release is extremely correlated with its position at 40 feet, and so
+on. To account for this I ran a Principal Component Analysis on the four
+variables which was something I saw in one of the papers we looked at
+for my Applied Statistical Modeling class and wanted to try out. It
+worked exceptionally well. The first two components not only represented
+88.05% of the variation, but they perfectly matched real-world pitch
+qualities:
+
+- PC1 (Overall Separation): Had entirely positive loadings, with the
+  heaviest weight placed on the distance between pitches at the tunnel
+  point. This component represents the overall separation between the
+  two pitches.
+
+- PC2 (The Late Break): The loadings for the distance between the
+  pitches at release and at 40 feet were positive, while the loadings
+  for the distance at the tunnel point and at the plate were negative
+  (with the distance at the plate being twice as heavily weighted). This
+  component can be interpreted as the late break of the pitch.
+
+#### PCA Output
+
+```{r}
+#Running the PCA
+pca_model <- prcomp(~ release_diff + early_diff + tunnel_diff+ plate_diff, 
+  data = paired_pitches, 
+  center = TRUE,
+  scale. = TRUE,
+)
+#|echo: true
+#Variance
+summary(pca_model)
+
+#Loadings
+pca_model$rotation
+```
+
+```{r}
+#Clean Data and Apply PCA
+tunnel_plus_data<-paired_pitches %>%
+  drop_na(effective_speed, pfx_x, pfx_z, plate_x, plate_z, delta_pitcher_run_exp, movement_diff)%>%
+  filter(pitch_type != "", !is.na(pitch_type))%>%
+  bind_cols(as_tibble(predict(pca_model, newdata = .))) %>%
+  rename(
+    Overall_Separation_PC1 = PC1,
+    Late_Break_Tunnel_PC2 = PC2)%>%
+  mutate(
+    PC1_z = as.numeric(scale(Overall_Separation_PC1)),
+    PC2_z = as.numeric(scale(Late_Break_Tunnel_PC2)),
+    score=(PC1_z+PC2_z)*-1,
+    Standardized_Score=scale(score),
+    is_whiff=ifelse(description %in% c("swinging_strike", "swinging_strike_blocked", "missed_bunt"), 1, 0),
+    is_called_strike=ifelse(description == "called_strike", 1, 0),
+  )
+#Find baselines for calculating Tunnel+ for 2026 data and my own data
+PC1mean<-mean(tunnel_plus_data$Overall_Separation_PC1)
+PC1sd<-sd(tunnel_plus_data$Overall_Separation_PC1)
+PC2mean<-mean(tunnel_plus_data$Late_Break_Tunnel_PC2)
+PC2sd<-sd(tunnel_plus_data$Late_Break_Tunnel_PC2)
+combinedmean<-mean(tunnel_plus_data$score)
+combinedsd<-sd(tunnel_plus_data$score)
+```
+
+```{r}
+#Inital Regression Model
+regression_model<-lm(delta_pitcher_run_exp ~ Overall_Separation_PC1+Late_Break_Tunnel_PC2, data = tunnel_plus_data)
+```
+
+```{r}
+#Models Illustratiing effectiveness
+tunnel_model <- lm(delta_pitcher_run_exp ~ Standardized_Score, data = tunnel_plus_data)
+contact_model<-lm(estimated_woba_using_speedangle~Standardized_Score, data = tunnel_plus_data)
+whiff_model<-glm(is_whiff~Standardized_Score, data=tunnel_plus_data, family=binomial)
+called_strike_model<-glm(is_called_strike~Standardized_Score, data=tunnel_plus_data, family=binomial)
+```
+
+```{r}
+#Best Tunnels
+best_tunnels<-tunnel_plus_data%>%
+  #Shows what initial regression thinks of the tunnel
+  mutate(
+     regression_score=predict(regression_model)
+  )%>%
+  select(
+    player_name,      
+    batter,         
+    game_date,    
+    game_pk,          
+    at_bat_number,    
+    pitch_number,     
+    inning,           
+    balls,
+    strikes,
+    pitch_type,
+    release_speed,
+    prev_pitch_type,
+    prev_pitch_velo,
+    Standardized_Score,
+    release_diff,
+    early_diff,
+    tunnel_diff,
+    plate_diff,
+    velo_diff,
+    pfx_x,
+    pfx_z,
+    prev_pfx_x,
+    prev_pfx_z,
+    Overall_Separation_PC1,
+    Late_Break_Tunnel_PC2,
+    movement_diff,
+    delta_pitcher_run_exp,
+    regression_score
+  )%>%
+  arrange((desc(Standardized_Score)))
+```
+
+## Creating Tunnel+:
+
+Using these two components I then ran a linear regression model
+predicting delta_pitcher_run_exp (Statcast’s metric that represents the
+change in run expectancy based on a particular pitch). This is similar
+to how metrics like Stuff+ and Command+ from FanGraphs are created.
+Unfortunately the “Tunneling” the model liked didn’t match the
+conventional definition of tunneling. The coefficient for PC1 was
+positive and significant indicating that the model preferred pitches
+with low separation, however the coefficient for PC2 was positive, and
+since the loadings for the distance between the pitches at the tunnel
+point and at the plate were negative this meant that the model preferred
+pitches with low late break. 
+
+Tunneling is best illustrated through pitch overlays and because
+Baseball Savant has video clips for each pitch I built a relatively
+simple video overlayer in Python using the Movie.py library. Here is a
+clip of the best tunneled pitch as seen by this model:
+
+#### Freddy Peralta Changeup and Fourseam
+
+<script>
+document.write(`
+  <video controls autoplay loop muted playsinline width="100%">
+    <source src="https://jsadowskivassar.github.io/Tunnel-Plus/PeraltaOverlay.mp4" type="video/mp4">
+  </video>
+`);
+</script>
+
+These pitches are essentially the opposite of tunneled. They come from
+completely different release points 9 inches apart, and then cross paths
+around the Tunnel Point and end up within 2 inches at the Plate. The two
+pitches start far apart and then end up close together instead of
+starting close together and ending far apart.
+
+I believe one reason the regression model opted for pitches with low
+plate distances is because pitches that end up far apart are much more
+likely to be balls and unappealing to swing at. To counteract this I
+tried adding an interaction term between PC2 and the pitch being in the
+strike zone. Sure enough the coefficient for PC2 was negative when the
+pitch was in the zone indicating that in this case more late break is
+better. This was a better result but still not entirely what I wanted as
+a good tunnel doesn’t necessarily have to end in the strike zone.
+
+My next strategy was aggregating the z-scores of PC1 and PC2. Equally
+weighting and adding the overall separation and late break ensures that
+what is thought of as a traditional tunnel, two pitches that look
+exactly the same for the beginning of their flight before aggressively
+breaking away from each other, was rewarded. This strategy was much more
+successful and generated some really good overlays:
+
+#### Zach Wheeler Sinker and Fourseam
+
+<script>
+document.write(`
+  <video controls autoplay loop muted playsinline width="100%">
+    <source src="https://jsadowskivassar.github.io/Tunnel-Plus/WheelerOverlay.mp4" type="video/mp4">
+  </video>
+`);
+</script>
+
+This was the highest scored tunnel in the dataset. Wheeler's 97mph
+fourseam and 96mph sinker come from the exact same release point, are
+0.18 inches apart at 40 feet and 2 inches apart at the tunnel point.
+After the tunnel point the fourseam stays on plane while the sinker
+drops ending up 8.5 inches below the fourseam. It's hard to see in the
+video but the batter Martin Maldonato takes the first sinker for a
+strike and then likely identifies the following fourseam as the same
+exact pitch causing him to swing under it, illustrating the
+effectiveness of tunneling.
+
+#### Brock Stewart Fourseam and Cutter
+
+<script>
+document.write(`
+  <video controls autoplay loop muted playsinline width="100%">
+    <source src="https://jsadowskivassar.github.io/Tunnel-Plus/BrockStewartOverlay.mp4" type="video/mp4">
+  </video>
+`);
+</script>
+
+The first pitch in this sequence was a dotted 96mph fastball that should
+have been called a strike but unfortunately was a ball. The next pitch,
+a 92mph cutter, once again comes from the exact same release point and
+is within 0.3 inches at 40 feet and 2 inches at the tunnel point before
+cutting in and ending up lower and closer to the middle of the plate.
+This difference combined with a 4mph velocity difference results in
+another swing and miss.
+
+#### Adrian Houser Sinker and Slider
+
+<script>
+document.write(`
+  <video controls autoplay loop muted playsinline width="100%">
+    <source src="https://jsadowskivassar.github.io/Tunnel-Plus/HouserOverlay.mp4" type="video/mp4">
+  </video>
+`);
+</script>
+
+My favorite overlay from the highest rated tunnels is Adrian Houser's
+90mph sinker and 82mph slider. These pitches come from the same release
+point, are within 0.1 inches at 40 feet, and are still within 4 inches
+at the tunnel point. Then the sinker darts inside to the righty batter
+while the slider sweeps outside ending 17 inches apart. Even though
+batter Jared Triolo impressively manages to lay off the low and away
+slider, this sequence makes for an incredible overlay.
+
+## Does Tunneling Matter:
+
+In addition to passing the eye test this tunneling metric was also shown
+to impact the game itself. Good tunneling was associated with a higher
+probability of a swing and miss or called strike, lower quality contact,
+and run prevention. 
+
+For individual pitches, a one standard deviation increase in Tunnel
+Score (10 point increase in Tunnel+) was associated with:
+
+- A 10.8% increase in swing and miss probability 
+
+- A 3.7% increase in called strike probability
+
+- A 0.005 point decrease in Expected wOBA on contact (xwOBAcon)
+
+- Preventing 0.006 more runs
+
+While 0.005 points of xwOBAcon and 0.006 runs may seem small, it is
+important to remember that these values apply to each individual pitch.
+Over the course of a full season where a starting pitcher throws around
+2,500 pitches, a 0.005 point drop in xwOBAcon is highly significant.
+Furthermore, preventing 0.006 runs per pitch equates to preventing an
+extra 15 runs over a season. Since roughly 9 to 10 runs equals 1 Win
+Above Replacement (WAR), a 1-standard-deviation increase in Tunnel+ is
+worth roughly 1.5 to 1.6 WAR.
+
+#### Impact of Tunnel+ on Pitch Outcomes
+
+```{r}
+#Table showing regression results of Tunnel+
+library(modelsummary)
+models <- list(
+  "Whiff Prob (Logit)" = whiff_model,
+  "Called Strike Prob (Logit)" = called_strike_model,
+  "xwOBAcon (OLS)" = contact_model,
+  "Run Expectancy (OLS)" = tunnel_model
+)
+modelsummary(
+  models,
+  stars = TRUE,
+  statistic = NULL,
+  coef_rename = c(
+    "(Intercept)" = "Intercept",
+    "Standardized_Score" = "Tunnel Score (Std. Dev.)"
+  ),
+  gof_omit = 'DF|Deviance|AIC|BIC|Log.Lik.|RMSE|Num.Obs|R2|R2 Adj.' 
+)
+
+```
+
+I also applied this same tunnel metric to pitches from the first week of
+the 2026 MLB season. Good tunneling was once again associated with a
+higher probability of a swing and miss or a called strike, lower
+expected wOBA on contact, and run prevention. Even though the much
+smaller sample size resulted in the run prevention coefficient being
+only marginally significant (p=0.0894) and the xwOBAcon coefficient not
+reaching statistical significance, the directional stability of the
+coefficients is highly encouraging. It demonstrates that across multiple
+years, tunneling is a meaningfully positive attribute for a pitcher.
+
+## MLB Leaderboards:
+
+### Pitch Sequences
+
+One of my main goals for this project was determining what pitchers are
+best at tunneling. To do so I grouped the data by pitcher and pitch
+sequence and then calculated each sequence's median Tunnel score
+(because tunnel scores are heavily skewed). The best pitch pairs are
+littered with some of the best pitchers in the league and guys that
+traditionally are considered good tunnelers including Zach Wheeler,
+Kevin Gausman, and Aaron Nola. Wheeler’s sinker and splitter leads the
+league with a Tunnel+ of 116. Here is the full leaderboard:
+
+```{r}
+#Shows best Tunneling pitches and some other metrics about these pitches
+pitch_pair_leaderboard<-tunnel_plus_data %>%
+  mutate(
+    pitch_sequence = paste(prev_pitch_type, pitch_type, sep = " + ")
+  ) %>%
+  group_by(player_name, pitch_sequence) %>%
+  filter(n() >= 50) %>% 
+  summarize(
+    total_thrown = n(),
+    elite_tunnel_percent= sum(Standardized_Score>=0.50)/total_thrown,
+    average_tunnel_value = median(score),
+    tunnel_90 = quantile(score, probs = 0.90, na.rm = TRUE),
+    average_woba= mean(estimated_woba_using_speedangle, na.rm=TRUE),
+    whiff_percentage=mean(is_whiff),
+    called_strike_percentage=mean(is_called_strike),
+    run_value = mean(delta_pitcher_run_exp),
+    movement_diff = mean(movement_diff),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Tunnel_Plus = round(100 + (scale(average_tunnel_value)[,1] * 10))) %>%
+  arrange(desc(average_tunnel_value))
+pairmean<-mean(pitch_pair_leaderboard$average_tunnel_value)
+pairsd<-sd(pitch_pair_leaderboard$average_tunnel_value)
+
+```
+
+#### Pitch Sequence Tunnel+ Leaderboard
+
+```{r}
+#|echo: true
+#Makes Interactive Leaderboard
+library(DT)
+datatable(pitch_pair_leaderboard%>%select(player_name, pitch_sequence, Tunnel_Plus), extensions = 'Scroller', options = list(scrollX = TRUE, scrollY = "400px",dom = 'ft', scroller=TRUE, deferRender = TRUE))
+```
+
+```{r}
+#Regressions for Pitch Pairs (No Significant findings)
+pair_contact_model<-lm(average_woba~average_tunnel_value, data = pitch_pair_leaderboard)
+pair_whiff_model<-glm(whiff_percentage~average_tunnel_value, data=pitch_pair_leaderboard)
+pair_called_strike_model<-lm(called_strike_percentage~average_tunnel_value, data=pitch_pair_leaderboard)
+pair_run_value<-lm(run_value~average_tunnel_value, data=pitch_pair_leaderboard)
+```
+
+### Pitcher Arsenals
+
+Next I scored each pitcher's overall arsenal by calculating a weighted
+average of each of their sequences and usage. Here are some of the
+standouts:
+
+#### Tyler Rogers
+
+Tyler Rogers had the highest Tunnel+ of 113. With a fastball averaging
+83.2 mph (in the 1st percentile) Rogers relies primarily on deception to
+get hitters out. As a result it is unsurprising that he grades out very
+well in tunneling. What he lacks in velocity, especially for a reliever,
+he makes up for due to his unusual submarine armslot, unusual pitch
+shapes, and elite tunneling. Although it is worth noting that Rogers
+only throws two pitches giving him the advantage of every pitch in his
+small arsenal tunneling extremely well.
+
+#### Bailey Ober
+
+The second best Tunneler and the best tunneling starting pitcher with a
+Tunnel+ of 112 was Bailey Ober. Initially I was a little surprised, but
+after looking at Ober’s profile it definitely makes sense. Ober is
+another pitcher that was able to be very effective despite low fastball
+velocity. In 2024 he posted 91st percentile pitching run value, with a
+fastball that averaged 91.7mph (16th percentile) and the next year would
+decline to 90.3mph (6th percentile). Lacking velocity, Ober relied on
+elite offspeeds and tunneling. His slider and fastball had a Tunnel+ of
+113 and changeup and fastball had a Tunnel+ of 110.
+
+#### Degrom and Alcantara
+
+The two big names in the top 10 are Jacob Degrom and Sandy Alcantara.
+These two pitchers are pretty much the opposite of Rogers and Ober. They
+are both power pitchers who pair elite velocity and elite tunneling to
+put up Cy Young winning numbers. Alcantara’s 98mph sinker and 92mph
+changeup are almost identical until the hitter's decision point. Then
+the changeup drops off the table while the sinker keeps riding up and
+armside. This allowed Alcantara to generate extremely high weak contact
+rates early in counts which resulted in his historic volume. In addition
+to Alcantara’s sinker and changeup combo which has a Tunnel+ of 114, his
+sinker also pairs exceptionally well with his slider with a Tunnel+ of
+112. This fastball slider combo is Jacob Degrom’s bread and butter. His
+99mph fastball with elite carry and 92mph slider with sharp late break
+pair perfectly and had a Tunnel+ of 113. Even post elbow surgery where
+Degrom’s stuff hasn’t fully reached 2021 levels his elite command and
+tunneling allow him to remain one of the best pitchers in the league. 
+
+#### Max Fried (The Anti-Tunneler)
+
+As far as the worst tunnelers in the league, one in particular stood
+out: perennial Cy Young candidate Max Fried. His well below league
+average Tunnel+ of 85 is not something you would expect for a pitcher of
+his caliber. This just goes to show that there are multiple ways to be
+an effective pitcher. Max Fried’s arsenal relies on having a lot of high
+quality pitches. He throws a fourseam, cutter, sinker, two-seam,
+curveball, sweeper, and change-up all more than 10% of the time. His
+fastballs tunnel decently well with his fourseam and sinker having a
+Tunnel+ of 103. However none of his offspeeds tunnel very well. This is
+exacerbated by Fried’s most used offspeed pitch being his relatively
+loopy curveball which is a pitch that is more difficult to tunnel due to
+it tending to pop-up out of the hand. Many pitchers that are known for
+their curveballs are below league average at tunneling, for example
+Clayton Kershaw had a Tunnel+ of 94 even with the data being from later
+in his career where he had to rely more on tunneling. Despite not being
+an elite tunneler Fried is still an elite pitcher due to having a deadly
+arsenal of high stuff pitches.
+
+```{r}
+#Shows bes tunneling arsenals and some other metrics about these arsenals
+arsenal_tunnel_leaderboard <- pitch_pair_leaderboard %>%
+  group_by(player_name) %>%
+  summarize(
+    total_arsenal_pitches = sum(total_thrown),
+    arsenal_tunnel_score = weighted.mean(average_tunnel_value, w = total_thrown),
+    arsenal_tunnel_percent=weighted.mean(elite_tunnel_percent, w = total_thrown),
+    arsenal_90=weighted.mean(tunnel_90, w = total_thrown),
+    arsenal_woba=mean(average_woba),
+    arsenal_whiff_rate=mean(whiff_percentage),
+    arsenal_called_strike_rate=mean(called_strike_percentage),
+    run_value = mean(run_value),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Tunnel_Plus = round(100 + (scale(arsenal_tunnel_score)[,1] * 10))) %>%
+  filter(total_arsenal_pitches>=500)%>%
+  arrange(desc(arsenal_tunnel_score))
+
+```
+
+#### Pitcher Arsenal Tunnel+ Leaderboard
+
+```{r}
+#|echo: true
+#Interactive leaderboard
+datatable(arsenal_tunnel_leaderboard%>%select(player_name, Tunnel_Plus), options = list(pageLength = 15, scrollX = TRUE, scrollY = "400px",dom = 'ft', deferRender = TRUE))
+```
+
+```{r}
+#Arsenal Regression models (No significant findings)
+arsenal_tunnel_model<-lm(arsenal_woba~arsenal_90, data=arsenal_tunnel_leaderboard)
+arsenal_whiff_model<-glm(arsenal_whiff_rate~arsenal_90, data=arsenal_tunnel_leaderboard)
+arsenal_called_strike_model<-lm(arsenal_called_strike_rate~arsenal_90, data=arsenal_tunnel_leaderboard)
+arsenal_run_value<-lm(run_value~arsenal_90, data=arsenal_tunnel_leaderboard)
+
+```
+
+```{r}
+#Same process as with 2024/2025 data but with 2026 data
+statcast_2026<-read.csv("savant_data.csv")
+statcast_2026<-statcast_2026 %>%
+  mutate(
+    y0=60.5-release_extension,
+    d=y0-23.8,
+    t_tunnel= quad(0.5*ay,vy0,d),
+    tunnel_x = release_pos_x + (vx0 * t_tunnel) + (0.5 * ax * (t_tunnel^2)),
+    tunnel_z = release_pos_z + (vz0 * t_tunnel) + (0.5 * az * (t_tunnel^2)),
+    d40=y0-40,
+    t40= quad(0.5*ay,vy0,d40),
+    x40 = release_pos_x + (vx0 * t40) + (0.5 * ax * (t40^2)),
+    z40 = release_pos_z + (vz0 * t40) + (0.5 * az * (t40^2)),
+    is_whiff=ifelse(description %in% c("swinging_strike", "swinging_strike_blocked", "missed_bunt"), 1, 0),
+    is_called_strike=ifelse(description == "called_strike", 1, 0)
+  )
+paired_pitches_2026 <- statcast_2026 %>%
+  arrange(player_name, game_pk, at_bat_number, pitch_number) %>%
+  group_by(game_pk, at_bat_number) %>%
+  mutate(
+    prev_pitch_type = lag(pitch_type),
+    prev_pitch_velo = lag(release_speed),
+    prev_release_x = lag(release_pos_x),
+    prev_release_z = lag(release_pos_z),
+    prev_x40 = lag(x40),
+    prev_z40 = lag (z40),
+    prev_tunnel_x = lag(tunnel_x),
+    prev_tunnel_z = lag(tunnel_z),
+    prev_plate_x = lag(plate_x),
+    prev_plate_z = lag(plate_z),
+    prev_pfx_x = lag(pfx_x),
+    prev_pfx_z = lag(pfx_z),
+    release_diff = sqrt((release_pos_x - prev_release_x)^2 + (release_pos_z - prev_release_z)^2),
+    early_diff = sqrt((x40 - prev_x40)^2 + (z40 - prev_z40)^2),
+    tunnel_diff = sqrt((tunnel_x - prev_tunnel_x)^2 + (tunnel_z - prev_tunnel_z)^2),
+    plate_diff = sqrt((plate_x - prev_plate_x)^2 + (plate_z - prev_plate_z)^2),
+    velo_diff = release_speed-prev_pitch_velo,
+    movement_diff=sqrt((pfx_x-prev_pfx_x)^2+(pfx_z-prev_pfx_z)^2)
+  ) %>%
+  ungroup() %>%
+  drop_na(release_diff, early_diff, tunnel_diff, plate_diff, velo_diff, movement_diff)%>%
+  filter(pitch_type!=prev_pitch_type)
+
+#Calculates PCA scores for 2026 data
+pca_scores_2026 <- predict(pca_model, newdata = paired_pitches_2026)
+
+#Adds rows to dataset
+paired_pitches_2026$PC1 <- pca_scores_2026[, "PC1"]
+paired_pitches_2026$PC2 <- pca_scores_2026[, "PC2"]
+paired_pitches_2026<- paired_pitches_2026%>%
+  mutate(
+    # Z-score against the 2024/2025 baseline
+    PC1_z = (PC1 - PC1mean) / PC1sd,
+    PC2_z = (PC2 - PC2mean) / PC2sd,
+    Combined_Score = PC1_z + PC2_z,
+    Standardized_Score=(Combined_Score - combinedmean)*-1,
+    #Tunnel+ against 2024/2025 Baseline
+    Tunnel_Plus = 100 + ((Standardized_Score/ combinedsd) * 10)
+  )
+#Leaderboard for best tunneling pitches
+pitch_pair_leaderboard_2026<-paired_pitches_2026 %>%
+  mutate(
+    pitch_sequence = paste(prev_pitch_type, pitch_type, sep = " + ")
+  ) %>%
+  group_by(player_name, pitch_sequence) %>%
+  filter(n() >= 5) %>% 
+  summarize(
+    total_thrown = n(),
+    average_tunnel_value = mean(Combined_Score),
+    tunnel_90 = quantile(Combined_Score, probs = 0.90, na.rm = TRUE),
+    average_woba= mean(estimated_woba_using_speedangle, na.rm=TRUE),
+    whiff_percentage=mean(is_whiff),
+    called_strike_percentage=mean(is_called_strike),
+    run_value = mean(delta_pitcher_run_exp),
+    movement_diff = mean(movement_diff),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Tunnel_Plus = 100 - (((average_tunnel_value - pairmean) / pairsd) * 10)
+  )%>%
+  arrange(desc(Tunnel_Plus))
+```
+
+```{r}
+#Regression models for 2026 data
+tunnel_model_2026 <- lm(delta_pitcher_run_exp ~ Standardized_Score, data = paired_pitches_2026)
+contact_model_2026<-lm(estimated_woba_using_speedangle~Standardized_Score, data = paired_pitches_2026)
+whiff_model_2026<-glm(is_whiff~Standardized_Score, data=paired_pitches_2026, family=binomial)
+called_strike_model_2026<-glm(is_called_strike~Standardized_Score, data=paired_pitches_2026, family=binomial)
+```
+
+```{r}
+#My Rapsodo Data
+#In the csv missing values values were "-" instaed of "NA"
+jack_tunnel_data<-read.csv("jack_tunnel.csv", na.strings = c("", "NA", "-"))
+```
+
+```{r}
+#The release point metrics were all over the map because of rapsodo being calibrated differently each session
+release_point<-jack_tunnel_data%>%
+  mutate(
+    real_date=substr(Date, 1, 15)
+  )%>%
+  group_by(real_date)%>%
+  summarize(
+    total_thrown = n(),
+    average_release_height = mean(Release.Height, na.rm=TRUE),
+    average_release_side= mean(Release.Side, na.rm=TRUE),
+    .groups = "drop")
+```
+
+```{r}
+jack_tunnel_data<-jack_tunnel_data%>%
+  mutate(
+    real_date=substr(Date, 1, 15),
+    Pitch.Type=ifelse(Pitch.Type=="Cutter", "Slider", Pitch.Type),
+  )%>%
+  group_by(real_date) %>%
+  #Normalizing release side via linear shift
+  mutate(
+    session_mean = mean(Release.Side, na.rm = TRUE),
+    adjustment_offset = -2.6 - session_mean,
+    Release.Side = Release.Side + adjustment_offset
+    
+  ) %>%
+  select(-session_mean, -adjustment_offset) %>%
+  ungroup()
+```
+
+```{r}
+clean_jack_tunnel_data<-jack_tunnel_data%>%
+  #Calculate pitch trajectory using kinematics
+  mutate(
+    Velocity_fps=Velocity*(22/15),
+    Horizontal.Angle = Horizontal.Angle * (pi / 180),
+    Release.Angle = Release.Angle * (pi / 180),
+    x0=Release.Side,
+    z0=Release.Height,
+    vx0=Velocity_fps*sin(Horizontal.Angle),
+    vy0=-Velocity_fps*cos(Horizontal.Angle)*cos(Release.Angle),
+    vz0=Velocity_fps*sin(Release.Angle),
+    #Acceleration due to drag of basebal source: Sports Math Textbook
+    ay=0.0018*vy0^2,
+    tf=quad(ay,vy0,55),
+    ax=(2*HB..trajectory./12)/(tf^2),
+    az=(2*VB..trajectory./12)/(tf^2),
+    t40= quad(ay,vy0,40),
+    x40 = x0 + (vx0 * t40) + (0.5 * ax * (t40^2)),
+    z40 = z0 + (vz0 * t40) + (0.5 * az * (t40^2)),
+    t_tunnel= quad(ay,vy0, 28.3),
+    tunnel_x = x0 + (vx0 * t_tunnel) + (0.5 * ax * (t_tunnel^2)),
+    tunnel_z = z0 + (vz0 * t_tunnel) + (0.5 * (az-32.174) * (t_tunnel^2)),
+    plate_x = x0 + (vx0 * tf) + (0.5 * ax * (tf^2)),
+    plate_z = z0 + (vz0 * tf) + (0.5 * (az - 32.174) * (tf^2))
+  )
+```
+
+```{r}
+jack_paired_pitches<-clean_jack_tunnel_data%>%
+  #Pair each pitch with its previous
+  mutate(
+    prev_pitch_type=lag(Pitch.Type),
+    prev_pitch_velo=lag(Velocity),
+    prev_x0=lag(Release.Side),
+    prev_z0=lag(Release.Height),
+    prev_x40 = lag(x40),
+    prev_z40 = lag (z40),
+    prev_tunnel_x = lag(tunnel_x),
+    prev_tunnel_z = lag(tunnel_z),
+    prev_plate_x = lag(plate_x),
+    prev_plate_z = lag(plate_z),
+    release_diff = sqrt((x0 - prev_x0)^2 + (z0 - prev_z0)^2),
+    early_diff = sqrt((x40 - prev_x40)^2 + (z40 - prev_z40)^2),
+    tunnel_diff = sqrt((tunnel_x - prev_tunnel_x)^2 + (tunnel_z - prev_tunnel_z)^2),
+    plate_diff = sqrt((plate_x - prev_plate_x)^2 + (plate_z - prev_plate_z)^2),
+  )%>%
+  select(
+    Pitch.Type,
+    prev_pitch_type,
+    Velocity,
+    prev_pitch_velo,
+    x0,
+    prev_x0,
+    z0,
+    prev_z0,
+    release_diff,
+    early_diff,
+    tunnel_diff,
+    plate_diff
+  )%>%
+  na.omit%>%
+  filter(Pitch.Type!=prev_pitch_type)%>%
+  #Removes extreme outliers
+  filter(release_diff<=3)
+```
+
+```{r}
+#Get PCA scores for each Pitch
+my_pca_scores <- predict(pca_model, newdata = jack_paired_pitches)
+
+#Add PC1 and PC2 to the dataset 
+jack_paired_pitches$PC1 <- my_pca_scores[, "PC1"]
+jack_paired_pitches$PC2 <- my_pca_scores[, "PC2"]
+
+jack_paired_pitches<- jack_paired_pitches%>%
+  mutate(
+    #Calculate z-scores against the baseline from 2024/2025 dataset
+    PC1_z = (PC1 - PC1mean) / PC1sd,
+    PC2_z = (PC2 - PC2mean) / PC2sd,
+    Combined_Score = (PC1_z + PC2_z)*-1,
+    Tunnel_Plus = round(100+(((Combined_Score - combinedmean) / combinedsd) * 10))
+  )
+#Calculate Tunnel+ for using baselines form 2024/2025 data
+jack_pitch_pair_leaderboard<-jack_paired_pitches %>%
+  mutate(
+    pitch_sequence = paste(prev_pitch_type, Pitch.Type, sep = " + ")
+  ) %>%
+  group_by(pitch_sequence) %>%
+  summarize(
+    total_thrown = n(),
+    average_tunnel_value = median(Combined_Score, na.rm=TRUE),
+    tunnel_90=quantile(Combined_Score, 0.9, na.rm=TRUE),
+    .groups = "drop"
+  )%>%
+  mutate(
+    Tunnel_Plus = round(100+(((average_tunnel_value - pairmean) / pairsd) * 10))
+  )
+```
+
+## My Own Tunneling:
+
+As a college pitcher, I thought it would be interesting to evaluate how
+well my pitches tunnel together. My school has a Rapsodo which we use to
+collect data during bullpen sessions, so I was able to use that data to
+calculate the metrics needed to find my own Tunnel+ values. I used
+release point, velocity, and horizontal and vertical break data to
+determine the trajectory of the pitch and calculate positions at 40
+feet, the tunnel point, and the plate.
+
+One of the biggest challenges with this approach was the quality of the
+tracking data. Rapsodo is much less precise than the Hawkeye system used
+in Major League Baseball, particularly when measuring release points.
+Before each bullpen, the only calibration we perform is setting the unit
+at the correct distance from home plate. We do our best to center the
+Rapsodo on the plate and align it parallel to home plate, but small
+setup errors are unavoidable. While these inaccuracies have little
+effect on the velocity and pitch movement data that we typically
+analyze, they can significantly impact the horizontal release point
+("release side"). As a result, each bullpen session in my dataset had a
+noticeably different average release side depending on how accurately
+the Rapsodo was aligned. 
+
+I attempted to combat this through normalizing each session by applying
+a linear shift to each session, standardizing my mean release side to
+2.6 feet (first-base side), which aligns with my true delivery. However,
+even after applying the linear shift many of the sessions still had
+outlier release points that didn’t seem reasonable and larger spreads
+than expected. This led me to conclude that portable Rapsodo tracking
+simply lacks the exactness required for precise release-point modeling.
+Because of this, my confidence in the exact Tunnel+ outputs for these
+bullpens is relatively low.
+
+Even with those limitations, looking at overall trends was interesting.
+My best tunneling pitches seem to be my Curveball/Changeup and
+Curveball/Slider. This makes sense because these pitches have similar
+movement. Especially in bullpens where I’m not throwing my hardest, the
+movement profiles of these three pitches tend to blend together. 
+
+The relationship I was most interested in was which pitch tunneled best
+with my fastball. It seemed to be my slider which is what I expected and
+affirms how I tend to use it. One of my favorite sequences against a
+right-handed batter is a fastball that starts inside and finishes over
+the middle of the plate, followed by a slider that begins on nearly the
+same trajectory before breaking farther inside. This has been a pretty
+effective sequence for me and due to the two pitches having a similar
+initial flight path before breaking apart, the slider often induces a
+swing-and-miss or weak contact.
+
+While looking at my Rapsodo data was really cool, the lower quality data
+and small sample size (I only had 118 total pitch pairs, 76 of which
+were fastball slider pairs) made it hard to get a clear view of my own
+tunneling and how I compare to major league pitchers. In the future I’m
+going to attempt to get more and better data to see if I can learn
+anything more about myself as a player.
+
+## Limitations and Future Work:
+
+### The Constant Acceleration Assumption
+
+The spatial checkpoints used in this model (such as the pitch location
+at 40 feet and the tunnel point) were calculated using basic kinematics
+derived from Statcast's standard 9-parameter tracking data. This relies
+on the assumption of constant acceleration. As a result, it cannot fully
+account for non-linear aerodynamic forces such drag and Seam-Shifted
+Wake (SSW) that can alter a pitch's trajectory. A future, more precise
+iteration of this model would utilize frame-by-frame optical tracking
+data rather than derived physics equations.
+
+### The Batter's Visual Perspective
+
+Tunnel+ evaluates the absolute 2D distance between pitches at specific
+spatial checkpoints. However, in reality, a tunnel is a matter of visual
+perception rather than absolute geometry. Because a batter stands
+offsetted in the batter's box, their view of the pitch plane is angled.
+A two-inch horizontal separation between two pitches presents a
+completely different visual overlap to a left-handed hitter than a
+right-handed hitter. Future work could involve projecting these 2D
+coordinates into a true visual angle based on the batter's specific eye
+level and handedness, measuring the deception rather than raw distance.
+
+### Strategic Intent
+
+One of the downsides of evaluating every pitch sequence and aggregating
+them all into a single Tunnel+ score is that the model assumes that
+every pitch is meant to tunnel off of the previous one. In actual
+baseball strategy, this is not the case. Pitchers frequently utilize
+"contrast pitches" such as throwing a high four-seam fastball
+immediately after a low curveball specifically to change a batter’s eye
+level and disrupt their visual baseline. Because the metric evaluates
+spatial separation, these intentionally different sequences grade out as
+poor tunnels, which can artificially drag down the aggregate score of
+pitchers who heavily utilize eye-level shifts in their pitch calling.
+Future iterations could involve filtering out these purposefully
+non-tunneling sequences before applying a universal tunneling score.
+
+### Follow-Up Using Full 2026 Data
+
+Data from the first week of the 2026 season was used to test whether the
+impact of Tunnel+ on an individual pitch's success persists across
+multiple years. A similar follow-up analysis will be conducted to
+determine whether a pitcher's Tunnel+ in prior datasets can accurately
+predict their 2026 Tunnel+. Because the 2026 MLB season is currently at
+the All-Star break, I am waiting for the conclusion of the regular
+season to run this year-over-year stability testing.
+
+## References
+
+- [Baseball Prospectus
+  Article](https://www.baseballprospectus.com/news/article/31030/prospectus-feature-introducing-pitch-tunnels/#:~:text=Tunnel%20Differential%20%E2%80%93%20This%20statistic%20tells,roughly%20175%20milliseconds%20before%20contact)
+
+- [FanGraphs
+  Article](https://tht.fangraphs.com/pitch-tunneling-is-it-real-and-how-do-pitchers-actually-pitch/)
+
+- [Driveline Video Explaining
+  Mix+](https://www.youtube.com/watch?v=OdL6dafOArc&t=305s)
+
+- ***Sports Math: An Introductory Course in the Mathematics of Sports
+  Science and Sports Analytics*** by Roland B. Minton (For Baseball drag
+  coefficent)
