@@ -59,6 +59,11 @@ To visually validate the model, this repository includes a custom video overlay 
 * **Normalizes** Variable Frame Rate (VFR) web video to a strict 60 FPS Constant Frame Rate using FFmpeg.
 * **Synchronizes & Blends** two pitch videos at the exact release frame using MoviePy, rendering 50% opacity overlays to visually demonstrate the tunnels.
 
+## Dataset
+The original MLB Statcast dataset has been removed from Kaggle. Due to GitHub file size constraints, the full 850 MB dataset is hosted externally.
+* **Full Dataset:** [Download via Google Drive here](https://drive.google.com/file/d/1axmIcyreZtEGcK1F7gTa4F_KKSqAg3sA/view?usp=sharing)
+* **Sample Data:** A 1,000-row `sample_2024_2025_data.csv` is included directly in the repository for quick testing.
+
 ## Repository Structure
 All project files are housed in the main branch for direct GitHub Pages rendering:
 
@@ -66,7 +71,7 @@ All project files are housed in the main branch for direct GitHub Pages renderin
 ├── PitchTunnelFinal.html                  # The final rendered blog post (Live Site)
 ├── PitchTunnelFinal.qmd                   # Quarto source code for the data analysis and blog text
 ├── Pitch_Overlayer.ipynb                  # Python code for MLB video scraping, FFmpeg, and MoviePy overlays
-├── statcast_bat_tracking_2024_2025.csv    # Statcast Data for Every Pitch of 2024 and 2025 MLB seasons
+├── sample_2024_2025_data.csv              # Abridged version of full dataset of Statcast data for Every Pitch of 2024 and 2025 MLB seasons
 ├── savant_data.csv                        # Stacsta Data for first week of 2026 MLB Seasons
 ├── rapsodo_data.csv                       # College bullpen tracking dataset 
 ├── wheeler_overlay.mp4                    # (and other .mp4 files) Pitch tunneling overalys made through Savant_Pitch_Overlayer_(Final).ipynb
