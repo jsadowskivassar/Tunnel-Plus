@@ -65,7 +65,7 @@ All project files are housed in the main branch for direct GitHub Pages renderin
 ```text
 ├── PitchTunnelFinal.html                  # The final rendered blog post (Live Site)
 ├── PitchTunnelFinal.qmd                   # Quarto source code for the data analysis and blog text
-├── Savant_Pitch_Overlayer_(Final).ipynb   # Python code for MLB video scraping, FFmpeg, and MoviePy overlays
+├── Pitch_Overlayer.ipynb                  # Python code for MLB video scraping, FFmpeg, and MoviePy overlays
 ├── statcast_bat_tracking_2024_2025.csv    # Statcast Data for Every Pitch of 2024 and 2025 MLB seasons
 ├── savant_data.csv                        # Stacsta Data for first week of 2026 MLB Seasons
 ├── rapsodo_data.csv                       # College bullpen tracking dataset 
