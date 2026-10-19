@@ -12,7 +12,7 @@ Top Ranked Pitch Sequence
 
 ## Methodology:
 
-The core metric was developed using MLB Statcast data from 2024 and 2025 and a multi-step modeling pipeline:
+The core metric was developed using MLB Statcast data from the 2024 and 2025 MLB seasons and a multi-step modeling pipeline:
 
 ### 1. Spatial Tracking at 4 Checkpoints
 Using kinematics and tracking data (velocity, acceleration, release coordinates), the model calculates pitch positions at four discrete flight milestones:
